@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Posture Check (MediaPipe Pose Landmarker)</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 16px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    .wrap { position: relative; display: inline-block; }
+    video { width: 720px; max-width: 95vw; border-radius: 12px; background: #111; }
+    canvas { position:absolute; left:0; top:0; }
+    .panel { margin-top: 12px; padding: 12px; border: 1px solid #ddd; border-radius: 12px; max-width: 720px; }
+    .badge { display:inline-block; padding: 2px 8px; border-radius: 999px; border: 1px solid #ddd; margin-left: 8px; }
+    .warn { border-color: #ff9f0a; }
+    .danger { border-color: #ff3b30; }
+    small { color:#555; }
+    input[type="number"]{ width: 84px; }
+  </style>
+
+  <!-- 公式ドキュメントのCDN利用例（vision_bundle.mjs） -->
+  <script type="module">
+    import {
+      PoseLandmarker,
+      FilesetResolver,
+      DrawingUtils
+    } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/vision_bundle.mjs";
+
+    // --- DOM ---
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("canvas");
+    const ctx = canvas.getContext("2d");
+    const btn = document.getElementById("toggle");
+    const camSel = document.getElementById("camera");
+    const statusEl = document.getElementById("status");
+    const angleEl = document.getElementById("angle");
+    const levelEl = document.getElementById("level");
+
+    const thWarnEl = document.getElementById("thWarn");
+    const thDangerEl = document.getElementById("thDanger");
+    const smoothEl = document.getElementById("smooth");
+
+    // --- State ---
+    let landmarker;
+    let drawingUtils;
+    let stream = null;
+    let running = false;
+    let lastVideoTime = -1;
+    let emaAngle = null; // smoothing
+
+    // Poseモデル（Lite / Full / Heavy のうち Liteを使用）
+    // 公式のモデル配布URL（.task）
+    const MODEL_URL =
+      "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task";
+
+    function deg(rad){ return rad * 180 / Math.PI; }
+
+    // 体幹前傾角（簡易）:
+    // hipCenter -> shoulderCenter ベクトルが鉛直（画面上方向）からどれだけ傾いているか（度）
+    // 注意: これはカメラ視点に依存（横から撮るほど「前傾」が安定）
+    function trunkFlexionAngle2D(landmarks){
+      // MediaPipe Pose indices:
+      // 11 L肩, 12 R肩, 23 L股, 24 R股
+      const ls = landmarks[11], rs = landmarks[12], lh = landmarks[23], rh = landmarks[24];
+      if(!ls || !rs || !lh || !rh) return null;
+
+      // visibility が低い時は無効扱い
+      const visMin = 0.5;
+      if((ls.visibility ?? 1) < visMin || (rs.visibility ?? 1) < visMin ||
+         (lh.visibility ?? 1) < visMin || (rh.visibility ?? 1) < visMin) return null;
+
+      const shoulder = { x:(ls.x+rs.x)/2, y:(ls.y+rs.y)/2 };
+      const hip      = { x:(lh.x+rh.x)/2, y:(lh.y+rh.y)/2 };
+
+      const vx = shoulder.x - hip.x;
+      const vy = shoulder.y - hip.y;
+
+      // 画面の鉛直上方向ベクトルは (0, -1)（yは下が正）
+      // 角度 = atan2(横成分, 鉛直成分) っぽく扱う
+      const angle = Math.abs(deg(Math.atan2(vx, -vy))); // 0°=まっすぐ、90°=水平
+      return angle;
+    }
+
+    function postureLevel(angleDeg, warnDeg, dangerDeg){
+      if(angleDeg == null) return { label:"No data", cls:"" };
+      if(angleDeg >= dangerDeg) return { label:"Danger", cls:"danger" };
+      if(angleDeg >= warnDeg) return { label:"Warn", cls:"warn" };
+      return { label:"OK", cls:"" };
+    }
+
+    async function listCameras(){
+      // enumerateDevices は getUserMedia の許可後の方がデバイス名が出やすい
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const cams = devices.filter(d => d.kind === "videoinput");
+      camSel.innerHTML = "";
+      cams.forEach((c, i) => {
+        const opt = document.createElement("option");
+        opt.value = c.deviceId;
+        opt.textContent = c.label || `Camera ${i+1}`;
+        camSel.appendChild(opt);
+      });
+      return cams.length;
+    }
+
+    async function startCamera(){
+      if(stream) stopCamera();
+      const deviceId = camSel.value || undefined;
+
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: deviceId ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
+                        : { width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false
+      });
+      video.srcObject = stream;
+      await video.play();
+
+      // canvasサイズを動画に合わせる
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      canvas.style.width = video.clientWidth + "px";
+      canvas.style.height = video.clientHeight + "px";
+
+      await listCameras();
+    }
+
+    function stopCamera(){
+      if(stream){
+        stream.getTracks().forEach(t => t.stop());
+        stream = null;
+      }
+      video.srcObject = null;
+    }
+
+    async function initLandmarker(){
+      statusEl.textContent = "Loading model...";
+      const vision = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+      );
+
+      landmarker = await PoseLandmarker.createFromOptions(vision, {
+        baseOptions: { modelAssetPath: MODEL_URL },
+        runningMode: "VIDEO",
+        numPoses: 1,
+        minPoseDetectionConfidence: 0.5,
+        minPosePresenceConfidence: 0.5,
+        minTrackingConfidence: 0.5
+      });
+
+      drawingUtils = new DrawingUtils(ctx);
+      statusEl.textContent = "Ready";
+    }
+
+    function render(){
+      if(!running) return;
+
+      // 画面クリア → 動画描画
+      ctx.save();
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      // 推論（同じフレームでの重複推論を避ける）
+      if(video.currentTime !== lastVideoTime){
+        const ts = performance.now();
+        const res = landmarker.detectForVideo(video, ts);
+        lastVideoTime = video.currentTime;
+
+        const lms = res?.landmarks?.[0];
+        if(lms){
+          // 骨格描画
+          drawingUtils.drawConnectors(lms, PoseLandmarker.POSE_CONNECTIONS);
+          drawingUtils.drawLandmarks(lms, { radius: 3 });
+
+          // 体幹前傾角
+          const raw = trunkFlexionAngle2D(lms);
+
+          // 平滑化（EMA）
+          const alpha = Math.min(Math.max(Number(smoothEl.value) || 0.25, 0), 1);
+          if(raw != null){
+            emaAngle = (emaAngle == null) ? raw : (alpha * raw + (1 - alpha) * emaAngle);
+          }
+          const shown = (emaAngle == null) ? null : emaAngle;
+
+          // 表示
+          if(shown == null){
+            angleEl.textContent = "-";
+          }else{
+            angleEl.textContent = shown.toFixed(1);
+          }
+
+          const warnDeg = Number(thWarnEl.value) || 25;
+          const dangerDeg = Number(thDangerEl.value) || 35;
+          const level = postureLevel(shown, warnDeg, dangerDeg);
+
+          levelEl.textContent = level.label;
+          levelEl.className = "badge " + (level.cls || "");
+        } else {
+          angleEl.textContent = "-";
+          levelEl.textContent = "No person";
+          levelEl.className = "badge";
+        }
+      }
+
+      ctx.restore();
+      requestAnimationFrame(render);
+    }
+
+    async function start(){
+      if(!landmarker) await initLandmarker();
+      await startCamera();
+      running = true;
+      btn.textContent = "Stop";
+      statusEl.textContent = "Running";
+      render();
+    }
+
+    function stop(){
+      running = false;
+      btn.textContent = "Start";
+      statusEl.textContent = "Stopped";
+      emaAngle = null;
+      lastVideoTime = -1;
+      // 描画消す
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      stopCamera();
+    }
+
+    // UI events
+    btn.addEventListener("click", async () => {
+      try{
+        if(!running) await start();
+        else stop();
+      }catch(e){
+        console.error(e);
+        statusEl.textContent = "Error: " + (e?.message || e);
+      }
+    });
+
+    camSel.addEventListener("change", async () => {
+      if(running){
+        await startCamera();
+      }
+    });
+
+    // 初期：カメラ一覧だけ先に（許可前はラベルが空でもOK）
+    listCameras().catch(()=>{});
+  </script>
+</head>
+
+<body>
+  <h2>作業者 姿勢評価（サンプル）</h2>
+
+  <div class="row">
+    <button id="toggle">Start</button>
+    <label>Camera:
+      <select id="camera"></select>
+    </label>
+    <span>State: <b id="status">Idle</b></span>
+  </div>
+
+  <div class="wrap" style="margin-top:12px;">
+    <video id="video" playsinline muted></video>
+    <canvas id="canvas"></canvas>
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <div>体幹前傾角（簡易）: <b><span id="angle">-</span>°</b></div>
+      <div class="badge" id="level">-</div>
+    </div>
+
+    <div class="row" style="margin-top:10px;">
+      <label>Warn閾値(°):
+        <input id="thWarn" type="number" value="25" min="0" max="90" step="1" />
+      </label>
+      <label>Danger閾値(°):
+        <input id="thDanger" type="number" value="35" min="0" max="90" step="1" />
+      </label>
+      <label>平滑化α(0-1):
+        <input id="smooth" type="number" value="0.25" min="0" max="1" step="0.05" />
+      </label>
+    </div>
+
+    <p style="margin-top:10px;">
+      <small>
+        推奨: 体幹前傾を見るなら、カメラはなるべく<strong>真横</strong>（作業者の側面）で、全身または腰〜上半身が映るように。
+        単眼なので、距離ではなく<strong>角度中心</strong>の評価が安定します。
+      </small>
+    </p>
+  </div>
+</body>
+</html>
