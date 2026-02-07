@@ -8,7 +8,7 @@
     body { font-family: system-ui, sans-serif; margin: 16px; }
     .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
     .wrap { position: relative; display: inline-block; }
-    video { width: 720px; max-width: 95vw; border-radius: 12px; background: #111; }
+    .media { width: 720px; max-width: 95vw; border-radius: 12px; background: #111; display: block; }
     canvas { position:absolute; left:0; top:0; }
     .panel { margin-top: 12px; padding: 12px; border: 1px solid #ddd; border-radius: 12px; max-width: 720px; }
     .badge { display:inline-block; padding: 2px 8px; border-radius: 999px; border: 1px solid #ddd; margin-left: 8px; }
@@ -28,6 +28,9 @@
 
     // --- DOM ---
     const video = document.getElementById("video");
+    const imageEl = document.getElementById("image");
+    const imageInput = document.getElementById("imageInput");
+    const imageControls = document.getElementById("imageControls");
     const canvas = document.getElementById("canvas");
     const ctx = canvas.getContext("2d");
     const btn = document.getElementById("toggle");
@@ -40,8 +43,13 @@
     const thDangerEl = document.getElementById("thDanger");
     const smoothEl = document.getElementById("smooth");
 
+    const IMAGE_MODE_VALUE = "__image__";
+    const DEFAULT_IMAGE_SRC = "./ad273b7c-9d8a-41e8-88ec-9f701afa84d1.png";
+
     // --- State ---
-    let landmarker;
+    let vision;
+    let landmarkerVideo;
+    let landmarkerImage;
     let drawingUtils;
     let stream = null;
     let running = false;
@@ -53,6 +61,17 @@
       "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task";
 
     function deg(rad){ return rad * 180 / Math.PI; }
+
+    function isImageMode(){
+      return camSel.value === IMAGE_MODE_VALUE;
+    }
+
+    function updateModeUI(){
+      const imgMode = isImageMode();
+      imageControls.style.display = imgMode ? "flex" : "none";
+      video.style.display = imgMode ? "none" : "block";
+      imageEl.style.display = imgMode ? "block" : "none";
+    }
 
     // Trunk flexion angle (2D)
     // hipCenter -> shoulderCenter vector angle from vertical axis
@@ -86,17 +105,78 @@
       return { label:"OK", cls:"" };
     }
 
+    async function getVision(){
+      if(!vision){
+        vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+        );
+      }
+      return vision;
+    }
+
+    async function getLandmarker(mode){
+      const v = await getVision();
+      if(mode === "VIDEO"){
+        if(!landmarkerVideo){
+          landmarkerVideo = await PoseLandmarker.createFromOptions(v, {
+            baseOptions: { modelAssetPath: MODEL_URL },
+            runningMode: "VIDEO",
+            numPoses: 1,
+            minPoseDetectionConfidence: 0.5,
+            minPosePresenceConfidence: 0.5,
+            minTrackingConfidence: 0.5
+          });
+        }
+        return landmarkerVideo;
+      }
+
+      if(!landmarkerImage){
+        landmarkerImage = await PoseLandmarker.createFromOptions(v, {
+          baseOptions: { modelAssetPath: MODEL_URL },
+          runningMode: "IMAGE",
+          numPoses: 1,
+          minPoseDetectionConfidence: 0.5,
+          minPosePresenceConfidence: 0.5,
+          minTrackingConfidence: 0.5
+        });
+      }
+      return landmarkerImage;
+    }
+
+    function ensureDrawingUtils(){
+      if(!drawingUtils){
+        drawingUtils = new DrawingUtils(ctx);
+      }
+    }
+
     async function listCameras(){
       // enumerateDevices shows labels after getUserMedia permission
       const devices = await navigator.mediaDevices.enumerateDevices();
       const cams = devices.filter(d => d.kind === "videoinput");
+      const prev = camSel.value;
+
       camSel.innerHTML = "";
+      const imgOpt = document.createElement("option");
+      imgOpt.value = IMAGE_MODE_VALUE;
+      imgOpt.textContent = "Image file";
+      camSel.appendChild(imgOpt);
+
       cams.forEach((c, i) => {
         const opt = document.createElement("option");
         opt.value = c.deviceId;
         opt.textContent = c.label || `Camera ${i+1}`;
         camSel.appendChild(opt);
       });
+
+      if(prev && [...camSel.options].some(o => o.value === prev)){
+        camSel.value = prev;
+      } else if(cams.length > 0){
+        camSel.value = cams[0].deviceId;
+      } else {
+        camSel.value = IMAGE_MODE_VALUE;
+      }
+
+      updateModeUI();
       return cams.length;
     }
 
@@ -112,12 +192,7 @@
       video.srcObject = stream;
       await video.play();
 
-      // Fit canvas to video size
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      canvas.style.width = video.clientWidth + "px";
-      canvas.style.height = video.clientHeight + "px";
-
+      syncCanvasToVideo();
       await listCameras();
     }
 
@@ -129,86 +204,128 @@
       video.srcObject = null;
     }
 
-    async function initLandmarker(){
-      statusEl.textContent = "Loading model...";
-      const vision = await FilesetResolver.forVisionTasks(
-        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
-      );
+    function syncCanvasToVideo(){
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      canvas.style.width = video.clientWidth + "px";
+      canvas.style.height = video.clientHeight + "px";
+    }
 
-      landmarker = await PoseLandmarker.createFromOptions(vision, {
-        baseOptions: { modelAssetPath: MODEL_URL },
-        runningMode: "VIDEO",
-        numPoses: 1,
-        minPoseDetectionConfidence: 0.5,
-        minPosePresenceConfidence: 0.5,
-        minTrackingConfidence: 0.5
+    function syncCanvasToImage(){
+      canvas.width = imageEl.naturalWidth;
+      canvas.height = imageEl.naturalHeight;
+      canvas.style.width = imageEl.clientWidth + "px";
+      canvas.style.height = imageEl.clientHeight + "px";
+    }
+
+    async function loadImage(url, revokeAfterLoad = false){
+      return new Promise((resolve, reject) => {
+        const cleanup = () => {
+          imageEl.onload = null;
+          imageEl.onerror = null;
+        };
+        imageEl.onload = () => {
+          cleanup();
+          if(revokeAfterLoad) URL.revokeObjectURL(url);
+          resolve();
+        };
+        imageEl.onerror = (e) => {
+          cleanup();
+          if(revokeAfterLoad) URL.revokeObjectURL(url);
+          reject(e);
+        };
+        imageEl.src = url;
       });
-
-      drawingUtils = new DrawingUtils(ctx);
-      statusEl.textContent = "Ready";
     }
 
-    function render(){
-      if(!running) return;
-
-      // Draw video frame
-      ctx.save();
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-      // Run pose once per new video frame
-      if(video.currentTime !== lastVideoTime){
-        const ts = performance.now();
-        const res = landmarker.detectForVideo(video, ts);
-        lastVideoTime = video.currentTime;
-
-        const lms = res?.landmarks?.[0];
-        if(lms){
-          // Draw landmarks
-          drawingUtils.drawConnectors(lms, PoseLandmarker.POSE_CONNECTIONS);
-          drawingUtils.drawLandmarks(lms, { radius: 3 });
-
-          // Trunk flexion angle
-          const raw = trunkFlexionAngle2D(lms);
-
-          // EMA smoothing
-          const alpha = Math.min(Math.max(Number(smoothEl.value) || 0.25, 0), 1);
-          if(raw != null){
-            emaAngle = (emaAngle == null) ? raw : (alpha * raw + (1 - alpha) * emaAngle);
-          }
-          const shown = (emaAngle == null) ? null : emaAngle;
-
-          // UI update
-          if(shown == null){
-            angleEl.textContent = "-";
-          }else{
-            angleEl.textContent = shown.toFixed(1);
-          }
-
-          const warnDeg = Number(thWarnEl.value) || 25;
-          const dangerDeg = Number(thDangerEl.value) || 35;
-          const level = postureLevel(shown, warnDeg, dangerDeg);
-
-          levelEl.textContent = level.label;
-          levelEl.className = "badge " + (level.cls || "");
-        } else {
-          angleEl.textContent = "-";
-          levelEl.textContent = "No person";
-          levelEl.className = "badge";
-        }
+    async function ensureImageReady(){
+      if(!imageEl.src){
+        await loadImage(DEFAULT_IMAGE_SRC);
+        return;
       }
-
-      ctx.restore();
-      requestAnimationFrame(render);
+      if(imageEl.complete && imageEl.naturalWidth > 0) return;
+      await new Promise((resolve, reject) => {
+        imageEl.onload = () => resolve();
+        imageEl.onerror = (e) => reject(e);
+      });
     }
 
-    async function start(){
-      if(!landmarker) await initLandmarker();
+    function drawPose(landmarks){
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      if(landmarks){
+        drawingUtils.drawConnectors(landmarks, PoseLandmarker.POSE_CONNECTIONS);
+        drawingUtils.drawLandmarks(landmarks, { radius: 3 });
+
+        const raw = trunkFlexionAngle2D(landmarks);
+        const alpha = Math.min(Math.max(Number(smoothEl.value) || 0.25, 0), 1);
+        if(raw != null){
+          emaAngle = (emaAngle == null) ? raw : (alpha * raw + (1 - alpha) * emaAngle);
+        }
+        const shown = (emaAngle == null) ? null : emaAngle;
+
+        if(shown == null){
+          angleEl.textContent = "-";
+        }else{
+          angleEl.textContent = shown.toFixed(1);
+        }
+
+        const warnDeg = Number(thWarnEl.value) || 25;
+        const dangerDeg = Number(thDangerEl.value) || 35;
+        const level = postureLevel(shown, warnDeg, dangerDeg);
+
+        levelEl.textContent = level.label;
+        levelEl.className = "badge " + (level.cls || "");
+      } else {
+        angleEl.textContent = "-";
+        levelEl.textContent = "No person";
+        levelEl.className = "badge";
+      }
+    }
+
+    function renderVideo(){
+      if(!running || isImageMode()) return;
+      if(video.currentTime !== lastVideoTime){
+        const res = landmarkerVideo.detectForVideo(video, performance.now());
+        lastVideoTime = video.currentTime;
+        drawPose(res?.landmarks?.[0]);
+      }
+      requestAnimationFrame(renderVideo);
+    }
+
+    async function renderImage(){
+      if(!running || !isImageMode()) return;
+      await ensureImageReady();
+      syncCanvasToImage();
+      const res = landmarkerImage.detect(imageEl);
+      drawPose(res?.landmarks?.[0]);
+    }
+
+    async function startVideoMode(){
+      statusEl.textContent = "Loading model...";
+      await getLandmarker("VIDEO");
+      ensureDrawingUtils();
+      updateModeUI();
       await startCamera();
       running = true;
       btn.textContent = "Stop";
       statusEl.textContent = "Running";
-      render();
+      emaAngle = null;
+      lastVideoTime = -1;
+      renderVideo();
+    }
+
+    async function startImageMode(){
+      statusEl.textContent = "Loading model...";
+      await getLandmarker("IMAGE");
+      ensureDrawingUtils();
+      updateModeUI();
+      stopCamera();
+      running = true;
+      btn.textContent = "Stop";
+      statusEl.textContent = "Image";
+      emaAngle = null;
+      lastVideoTime = -1;
+      await renderImage();
     }
 
     function stop(){
@@ -224,8 +341,12 @@
     // UI events
     btn.addEventListener("click", async () => {
       try{
-        if(!running) await start();
-        else stop();
+        if(!running){
+          if(isImageMode()) await startImageMode();
+          else await startVideoMode();
+        }else{
+          stop();
+        }
       }catch(e){
         console.error(e);
         statusEl.textContent = "Error: " + (e?.message || e);
@@ -233,8 +354,31 @@
     });
 
     camSel.addEventListener("change", async () => {
-      if(running){
-        await startCamera();
+      try{
+        updateModeUI();
+        if(isImageMode()){
+          await startImageMode();
+        }else if(running){
+          await startVideoMode();
+        }
+      }catch(e){
+        console.error(e);
+        statusEl.textContent = "Error: " + (e?.message || e);
+      }
+    });
+
+    imageInput.addEventListener("change", async () => {
+      const file = imageInput.files && imageInput.files[0];
+      if(!file) return;
+      try{
+        const url = URL.createObjectURL(file);
+        await loadImage(url, true);
+        camSel.value = IMAGE_MODE_VALUE;
+        updateModeUI();
+        await startImageMode();
+      }catch(e){
+        console.error(e);
+        statusEl.textContent = "Error: " + (e?.message || e);
       }
     });
 
@@ -255,8 +399,16 @@
   </div>
 
   <div class="wrap" style="margin-top:12px;">
-    <video id="video" playsinline muted></video>
+    <video id="video" class="media" playsinline muted></video>
+    <img id="image" class="media" alt="Selected image" style="display:none" />
     <canvas id="canvas"></canvas>
+  </div>
+
+  <div class="row" id="imageControls" style="margin-top:8px; display:none;">
+    <label>Image file:
+      <input id="imageInput" type="file" accept="image/*" />
+    </label>
+    <small>Default: ad273b7c-9d8a-41e8-88ec-9f701afa84d1.png</small>
   </div>
 
   <div class="panel">
