@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="ja">
 <head>
   <meta charset="utf-8" />
@@ -18,7 +18,7 @@
     input[type="number"]{ width: 84px; }
   </style>
 
-  <!-- 公式ドキュメントのCDN利用例（vision_bundle.mjs） -->
+  <!-- MediaPipe Tasks Vision CDN (vision_bundle.mjs) -->
   <script type="module">
     import {
       PoseLandmarker,
@@ -48,23 +48,21 @@
     let lastVideoTime = -1;
     let emaAngle = null; // smoothing
 
-    // Poseモデル（Lite / Full / Heavy のうち Liteを使用）
-    // 公式のモデル配布URL（.task）
+    // Pose model: Lite / Full / Heavy (using Lite)
     const MODEL_URL =
       "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task";
 
     function deg(rad){ return rad * 180 / Math.PI; }
 
-    // 体幹前傾角（簡易）:
-    // hipCenter -> shoulderCenter ベクトルが鉛直（画面上方向）からどれだけ傾いているか（度）
-    // 注意: これはカメラ視点に依存（横から撮るほど「前傾」が安定）
+    // Trunk flexion angle (2D)
+    // hipCenter -> shoulderCenter vector angle from vertical axis
     function trunkFlexionAngle2D(landmarks){
       // MediaPipe Pose indices:
-      // 11 L肩, 12 R肩, 23 L股, 24 R股
+      // 11 L shoulder, 12 R shoulder, 23 L hip, 24 R hip
       const ls = landmarks[11], rs = landmarks[12], lh = landmarks[23], rh = landmarks[24];
       if(!ls || !rs || !lh || !rh) return null;
 
-      // visibility が低い時は無効扱い
+      // If visibility is low, return null
       const visMin = 0.5;
       if((ls.visibility ?? 1) < visMin || (rs.visibility ?? 1) < visMin ||
          (lh.visibility ?? 1) < visMin || (rh.visibility ?? 1) < visMin) return null;
@@ -75,9 +73,9 @@
       const vx = shoulder.x - hip.x;
       const vy = shoulder.y - hip.y;
 
-      // 画面の鉛直上方向ベクトルは (0, -1)（yは下が正）
-      // 角度 = atan2(横成分, 鉛直成分) っぽく扱う
-      const angle = Math.abs(deg(Math.atan2(vx, -vy))); // 0°=まっすぐ、90°=水平
+      // Image coordinates: +y is downward.
+      // angle = atan2(x, -y). 0° = upright, 90° = horizontal.
+      const angle = Math.abs(deg(Math.atan2(vx, -vy)));
       return angle;
     }
 
@@ -89,7 +87,7 @@
     }
 
     async function listCameras(){
-      // enumerateDevices は getUserMedia の許可後の方がデバイス名が出やすい
+      // enumerateDevices shows labels after getUserMedia permission
       const devices = await navigator.mediaDevices.enumerateDevices();
       const cams = devices.filter(d => d.kind === "videoinput");
       camSel.innerHTML = "";
@@ -114,7 +112,7 @@
       video.srcObject = stream;
       await video.play();
 
-      // canvasサイズを動画に合わせる
+      // Fit canvas to video size
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
       canvas.style.width = video.clientWidth + "px";
@@ -153,12 +151,12 @@
     function render(){
       if(!running) return;
 
-      // 画面クリア → 動画描画
+      // Draw video frame
       ctx.save();
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-      // 推論（同じフレームでの重複推論を避ける）
+      // Run pose once per new video frame
       if(video.currentTime !== lastVideoTime){
         const ts = performance.now();
         const res = landmarker.detectForVideo(video, ts);
@@ -166,21 +164,21 @@
 
         const lms = res?.landmarks?.[0];
         if(lms){
-          // 骨格描画
+          // Draw landmarks
           drawingUtils.drawConnectors(lms, PoseLandmarker.POSE_CONNECTIONS);
           drawingUtils.drawLandmarks(lms, { radius: 3 });
 
-          // 体幹前傾角
+          // Trunk flexion angle
           const raw = trunkFlexionAngle2D(lms);
 
-          // 平滑化（EMA）
+          // EMA smoothing
           const alpha = Math.min(Math.max(Number(smoothEl.value) || 0.25, 0), 1);
           if(raw != null){
             emaAngle = (emaAngle == null) ? raw : (alpha * raw + (1 - alpha) * emaAngle);
           }
           const shown = (emaAngle == null) ? null : emaAngle;
 
-          // 表示
+          // UI update
           if(shown == null){
             angleEl.textContent = "-";
           }else{
@@ -219,7 +217,6 @@
       statusEl.textContent = "Stopped";
       emaAngle = null;
       lastVideoTime = -1;
-      // 描画消す
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       stopCamera();
     }
@@ -241,13 +238,13 @@
       }
     });
 
-    // 初期：カメラ一覧だけ先に（許可前はラベルが空でもOK）
+    // Preload camera list (labels may be empty until permission)
     listCameras().catch(()=>{});
   </script>
 </head>
 
 <body>
-  <h2>作業者 姿勢評価（サンプル）</h2>
+  <h2>姿勢チェック（MediaPipe Pose Landmarker）</h2>
 
   <div class="row">
     <button id="toggle">Start</button>
@@ -264,26 +261,27 @@
 
   <div class="panel">
     <div class="row">
-      <div>体幹前傾角（簡易）: <b><span id="angle">-</span>°</b></div>
+      <div>体幹前屈角（推定）: <b><span id="angle">-</span>&deg;</b></div>
       <div class="badge" id="level">-</div>
     </div>
 
     <div class="row" style="margin-top:10px;">
-      <label>Warn閾値(°):
+      <label>Warnしきい値(&deg;):
         <input id="thWarn" type="number" value="25" min="0" max="90" step="1" />
       </label>
-      <label>Danger閾値(°):
+      <label>Dangerしきい値(&deg;):
         <input id="thDanger" type="number" value="35" min="0" max="90" step="1" />
       </label>
-      <label>平滑化α(0-1):
+      <label>平滑化係数(0-1):
         <input id="smooth" type="number" value="0.25" min="0" max="1" step="0.05" />
       </label>
     </div>
 
     <p style="margin-top:10px;">
       <small>
-        推奨: 体幹前傾を見るなら、カメラはなるべく<strong>真横</strong>（作業者の側面）で、全身または腰〜上半身が映るように。
-        単眼なので、距離ではなく<strong>角度中心</strong>の評価が安定します。
+        目安: 体幹前屈角はカメラ位置や被写体の向きで変わります。
+        カメラは胸〜腰が正面に入る位置に置くと安定します。
+        これは簡易的なデモであり、医療・診断用途ではありません。
       </small>
     </p>
   </div>
