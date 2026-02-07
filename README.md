@@ -41,6 +41,3 @@ MediaPipe Pose Landmarker（CDN）を使って骨格推定を行います。
 
 ## File Structure
 - `index.html` : メインページ（HTML/CSS/JS 一体型）
-
-## License
-このリポジトリにライセンス表記がないため、必要なら追加してください。
