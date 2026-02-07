@@ -275,11 +275,57 @@
 
         levelEl.textContent = level.label;
         levelEl.className = "badge " + (level.cls || "");
+
+        if(shown != null){
+          drawAngleOverlay(landmarks, shown);
+        }
       } else {
         angleEl.textContent = "-";
         levelEl.textContent = "No person";
         levelEl.className = "badge";
       }
+    }
+
+    function drawAngleOverlay(landmarks, angleDeg){
+      const ls = landmarks[11], rs = landmarks[12], lh = landmarks[23], rh = landmarks[24];
+      if(!ls || !rs || !lh || !rh) return;
+
+      const shoulder = { x:(ls.x+rs.x)/2, y:(ls.y+rs.y)/2 };
+      const hip      = { x:(lh.x+rh.x)/2, y:(lh.y+rh.y)/2 };
+
+      const shX = shoulder.x * canvas.width;
+      const shY = shoulder.y * canvas.height;
+      const hipX = hip.x * canvas.width;
+      const hipY = hip.y * canvas.height;
+
+      // Draw trunk vector line
+      ctx.save();
+      ctx.strokeStyle = "rgba(0, 200, 255, 0.9)";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(hipX, hipY);
+      ctx.lineTo(shX, shY);
+      ctx.stroke();
+
+      // Label near shoulder center
+      const label = `体幹前屈角: ${angleDeg.toFixed(1)}°`;
+      ctx.font = "16px system-ui, sans-serif";
+      ctx.textBaseline = "middle";
+      const paddingX = 6;
+      const paddingY = 4;
+      const textWidth = ctx.measureText(label).width;
+      let labelX = shX + 8;
+      let labelY = shY - 14;
+      if(labelY < 10) labelY = shY + 14;
+      if(labelX + textWidth + paddingX * 2 > canvas.width){
+        labelX = Math.max(4, shX - textWidth - paddingX * 2 - 8);
+      }
+
+      ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
+      ctx.fillRect(labelX, labelY - 10, textWidth + paddingX * 2, 20);
+      ctx.fillStyle = "#fff";
+      ctx.fillText(label, labelX + paddingX, labelY);
+      ctx.restore();
     }
 
     function renderVideo(){
